@@ -1,0 +1,816 @@
+<?php
+
+define('BASEPATH', __DIR__ . DIRECTORY_SEPARATOR);
+
+class CI_Controller
+{
+}
+
+class CI_Model
+{
+}
+
+class FakeSession
+{
+    public function userdata($key)
+    {
+        $values = array('user_id' => 42, 'logged_in' => true);
+        return isset($values[$key]) ? $values[$key] : null;
+    }
+}
+
+class FakeProfileInteractionModel
+{
+    private $blocked_user_ids;
+
+    public function __construct($blocked_user_ids)
+    {
+        $this->blocked_user_ids = $blocked_user_ids;
+    }
+
+    public function blocked_user_ids($user_id)
+    {
+        return $this->blocked_user_ids;
+    }
+}
+
+class FakeOutput
+{
+    public $status_code;
+    public $content_type;
+    public $output;
+
+    public function set_status_header($status_code)
+    {
+        $this->status_code = $status_code;
+        return $this;
+    }
+
+    public function set_content_type($content_type, $charset = null)
+    {
+        $this->content_type = $content_type;
+        return $this;
+    }
+
+    public function set_output($output)
+    {
+        $this->output = $output;
+        return $this;
+    }
+}
+
+class FakeAiMatchModel
+{
+    public $candidates = array();
+    public $save_outcomes = array();
+    public $saved_rows = array();
+    public $attempted_rows = array();
+    public $text_similarity = array(
+        'score' => 0,
+        'available' => false,
+        'shared_terms' => array(),
+        'comparable_fields' => array()
+    );
+
+    public function get_user_profile($user_id)
+    {
+        return (object) array('id' => $user_id, 'gender' => 'male');
+    }
+
+    public function get_preferences($user_id)
+    {
+        return make_preferences();
+    }
+
+    public function get_candidates($user_id, $excluded_user_ids = array())
+    {
+        return array_values(array_filter($this->candidates, function ($candidate) use ($excluded_user_ids) {
+            return !in_array((int) $candidate->id, $excluded_user_ids, TRUE);
+        }));
+    }
+
+    public function build_semantic_profile_text($profile, $is_preferences = false)
+    {
+        return array();
+    }
+
+    public function calculate_text_similarity($text_a, $text_b)
+    {
+        return $this->text_similarity;
+    }
+
+    public function save_match_result($data)
+    {
+        $this->attempted_rows[] = $data;
+        $candidate_id = (int) $data['matched_user_id'];
+        $saved = isset($this->save_outcomes[$candidate_id])
+            ? $this->save_outcomes[$candidate_id]
+            : true;
+
+        if ($saved) {
+            $this->saved_rows[] = $data;
+        }
+
+        return $saved;
+    }
+}
+
+class FakeDatabase
+{
+    public $db_debug = true;
+    public $insert_result;
+    public $insert_calls = 0;
+
+    public function __construct($insert_result)
+    {
+        $this->insert_result = $insert_result;
+    }
+
+    public function insert($table, $data)
+    {
+        $this->insert_calls++;
+        return $this->insert_result;
+    }
+
+    public function error()
+    {
+        return array('code' => 1452, 'message' => 'simulated insert failure');
+    }
+}
+
+function log_message($level, $message)
+{
+    $GLOBALS['test_logs'][] = array($level, $message);
+}
+
+require dirname(__DIR__) . DIRECTORY_SEPARATOR .
+    'application' . DIRECTORY_SEPARATOR .
+    'controllers' . DIRECTORY_SEPARATOR . 'Ai.php';
+
+require dirname(__DIR__) . DIRECTORY_SEPARATOR .
+    'application' . DIRECTORY_SEPARATOR .
+    'models' . DIRECTORY_SEPARATOR . 'Ai_match_model.php';
+
+$controller_reflection = new ReflectionClass('Ai');
+$controller = $controller_reflection->newInstanceWithoutConstructor();
+$model_reflection = new ReflectionClass('Ai_match_model');
+$model = $model_reflection->newInstanceWithoutConstructor();
+
+$filter = $controller_reflection->getMethod('passes_hard_filters');
+$filter->setAccessible(true);
+$valid_age_preferences = $controller_reflection->getMethod('has_valid_age_preferences');
+$valid_age_preferences->setAccessible(true);
+$calculate_score = $controller_reflection->getMethod('calculate_score');
+$calculate_score->setAccessible(true);
+
+$assertions = 0;
+
+function assert_result($expected, $actual, $label)
+{
+    global $assertions;
+    $assertions++;
+
+    $matches = is_numeric($expected) && is_numeric($actual)
+        ? abs((float) $expected - (float) $actual) < 0.005
+        : $expected === $actual;
+
+    if (!$matches) {
+        fwrite(
+            STDERR,
+            'FAIL: ' . $label . ' (expected ' .
+            var_export($expected, true) . ', got ' .
+            var_export($actual, true) . ')' . PHP_EOL
+        );
+        exit(1);
+    }
+}
+
+function make_candidate($overrides = array())
+{
+    return (object) array_merge(
+        array(
+            'gender' => 'female',
+            'date_of_birth' => date('Y-m-d', strtotime('-25 years')),
+            'country' => null,
+            'state' => null,
+            'city' => null,
+            'religion' => null,
+            'community' => null,
+            'education' => null,
+            'profession' => null,
+            'marital_status' => null,
+            'eating_habit' => null,
+            'smoking_habit' => null,
+            'drinking_habit' => null,
+            'bio' => null
+        ),
+        $overrides
+    );
+}
+
+function make_preferences($overrides = array())
+{
+    return (object) array_merge(
+        array(
+            'min_age' => 18,
+            'max_age' => 35,
+            'preferred_country' => null,
+            'preferred_state' => null,
+            'preferred_city' => null,
+            'preferred_religion' => null,
+            'preferred_community' => null,
+            'min_education' => null,
+            'preferred_profession' => null,
+            'lifestyle' => null,
+            'family_values' => null,
+            'other_preferences' => null,
+            'eating_habit' => null,
+            'smoking_habit' => null,
+            'drinking_habit' => null,
+            'marital_status' => 'any'
+        ),
+        $overrides
+    );
+}
+
+function score_candidate($calculate_score, $preferences, $candidate)
+{
+    return $calculate_score->invoke(
+        $GLOBALS['controller'],
+        $preferences,
+        $candidate
+    );
+}
+
+function make_api_candidate($id)
+{
+    return make_candidate(array(
+        'id' => $id,
+        'name' => 'Test candidate ' . $id,
+        'gender' => 'female',
+        'date_of_birth' => date('Y-m-d', strtotime('-25 years'))
+    ));
+}
+
+function run_fake_matching($fake_model, $blocked_user_ids = array())
+{
+    $reflection = new ReflectionClass('Ai');
+    $instance = $reflection->newInstanceWithoutConstructor();
+    $instance->session = new FakeSession();
+    $instance->Ai_match_model = $fake_model;
+    $instance->Profile_interaction_model = new FakeProfileInteractionModel($blocked_user_ids);
+    $instance->output = new FakeOutput();
+    $instance->index();
+
+    return array(
+        'status' => $instance->output->status_code,
+        'content_type' => $instance->output->content_type,
+        'body' => json_decode($instance->output->output, true)
+    );
+}
+
+function matches_filter($filter, $candidate, $preferences, $requester_gender = 'male')
+{
+    return $filter->invoke(
+        $GLOBALS['controller'],
+        $candidate,
+        $preferences,
+        (object) array('gender' => $requester_gender)
+    );
+}
+
+$today = new DateTime('today');
+$age_18_dob = (clone $today)->modify('-18 years')->format('Y-m-d');
+$age_17_dob = (clone $today)->modify('-17 years')->format('Y-m-d');
+$age_35_dob = (clone $today)->modify('-35 years')->format('Y-m-d');
+$age_36_dob = (clone $today)->modify('-36 years')->format('Y-m-d');
+$future_dob = (clone $today)->modify('+1 day')->format('Y-m-d');
+
+assert_result(
+    true,
+    matches_filter(
+        $filter,
+        make_candidate(array('date_of_birth' => $age_18_dob)),
+        make_preferences()
+    ),
+    'minimum-age boundary is eligible'
+);
+assert_result(
+    false,
+    matches_filter(
+        $filter,
+        make_candidate(array('date_of_birth' => $age_17_dob)),
+        make_preferences()
+    ),
+    'below-minimum age is excluded'
+);
+assert_result(
+    true,
+    matches_filter(
+        $filter,
+        make_candidate(array('date_of_birth' => $age_35_dob)),
+        make_preferences()
+    ),
+    'maximum-age boundary is eligible'
+);
+assert_result(
+    false,
+    matches_filter(
+        $filter,
+        make_candidate(array('date_of_birth' => $age_36_dob)),
+        make_preferences()
+    ),
+    'above-maximum age is excluded'
+);
+assert_result(
+    true,
+    matches_filter(
+        $filter,
+        make_candidate(array('date_of_birth' => $age_18_dob)),
+        make_preferences(array('max_age' => null))
+    ),
+    'minimum-only age range is applied'
+);
+assert_result(
+    false,
+    matches_filter(
+        $filter,
+        make_candidate(array('date_of_birth' => $age_36_dob)),
+        make_preferences(array('min_age' => null))
+    ),
+    'maximum-only age range is applied'
+);
+
+foreach (array(null, '', 'not-a-date', '2025-02-29', $future_dob) as $invalid_dob) {
+    assert_result(
+        false,
+        matches_filter(
+            $filter,
+            make_candidate(array('date_of_birth' => $invalid_dob)),
+            make_preferences()
+        ),
+        'missing, invalid, or future DOB is excluded'
+    );
+}
+
+assert_result(
+    true,
+    matches_filter(
+        $filter,
+        make_candidate(array('gender' => 'female')),
+        make_preferences(),
+        'male'
+    ),
+    'male requester retains female-candidate eligibility'
+);
+assert_result(
+    false,
+    matches_filter(
+        $filter,
+        make_candidate(array('gender' => 'male')),
+        make_preferences(),
+        'male'
+    ),
+    'male requester excludes male candidate'
+);
+assert_result(
+    true,
+    matches_filter(
+        $filter,
+        make_candidate(array('gender' => 'male')),
+        make_preferences(),
+        'female'
+    ),
+    'female requester retains male-candidate eligibility'
+);
+assert_result(
+    false,
+    matches_filter(
+        $filter,
+        make_candidate(array('gender' => 'female')),
+        make_preferences(),
+        'female'
+    ),
+    'female requester excludes female candidate'
+);
+assert_result(
+    true,
+    matches_filter(
+        $filter,
+        make_candidate(array('gender' => 'other')),
+        make_preferences(),
+        'other'
+    ),
+    'other requester retains existing unrestricted gender behavior'
+);
+assert_result(
+    false,
+    matches_filter(
+        $filter,
+        make_candidate(array('gender' => null)),
+        make_preferences(),
+        'other'
+    ),
+    'missing candidate gender is excluded'
+);
+assert_result(
+    false,
+    matches_filter(
+        $filter,
+        make_candidate(),
+        make_preferences(),
+        'unknown'
+    ),
+    'unsupported requester gender is not silently eligible'
+);
+
+assert_result(
+    true,
+    matches_filter(
+        $filter,
+        make_candidate(array('city' => ' Ahmedabad ')),
+        make_preferences(array('preferred_city' => 'ahmedabad'))
+    ),
+    'configured location comparison trims and ignores case'
+);
+assert_result(
+    false,
+    matches_filter(
+        $filter,
+        make_candidate(array('city' => 'Surat')),
+        make_preferences(array('preferred_city' => 'Ahmedabad')),
+        'male'
+    ),
+    'known location mismatch retains existing exclusion behavior'
+);
+assert_result(
+    true,
+    matches_filter(
+        $filter,
+        make_candidate(array('marital_status' => null)),
+        make_preferences()
+    ),
+    'missing optional marital status is allowed for any preference'
+);
+assert_result(
+    false,
+    matches_filter(
+        $filter,
+        make_candidate(array('marital_status' => null)),
+        make_preferences(array('marital_status' => 'never_married'))
+    ),
+    'missing marital status is excluded when a specific status is requested'
+);
+
+assert_result(
+    true,
+    $valid_age_preferences->invoke(
+        $controller,
+        make_preferences(array('min_age' => null, 'max_age' => 35))
+    ),
+    'valid one-sided age preference is accepted'
+);
+assert_result(
+    false,
+    $valid_age_preferences->invoke(
+        $controller,
+        make_preferences(array('min_age' => 36, 'max_age' => 35))
+    ),
+    'inverted age range is rejected'
+);
+assert_result(
+    false,
+    $valid_age_preferences->invoke(
+        $controller,
+        make_preferences(array('min_age' => 17))
+    ),
+    'age preference below 18 is rejected'
+);
+
+$strong_score = score_candidate(
+    $calculate_score,
+    make_preferences(array(
+        'preferred_city' => 'Ahmedabad',
+        'preferred_country' => 'India',
+        'preferred_religion' => 'Muslim',
+        'min_education' => 'BCA',
+        'preferred_profession' => 'Engineer',
+        'eating_habit' => 'vegetarian'
+    )),
+    make_candidate(array(
+        'date_of_birth' => date('Y-m-d', strtotime('-25 years')),
+        'city' => 'Ahmedabad',
+        'country' => 'India',
+        'religion' => 'Muslim',
+        'education' => 'BCA',
+        'profession' => 'Software Engineer',
+        'eating_habit' => 'vegetarian'
+    ))
+);
+assert_result(87.5, $strong_score['total'], 'coverage limits strong score when some scoring dimensions are unknown');
+assert_result(75.0, $strong_score['coverage'], 'strong candidate has 75% of total scoring-weight evidence');
+assert_result(
+    true,
+    $strong_score['total'] >= 0 && $strong_score['total'] <= 100,
+    'calculated score stays within 0 and 100'
+);
+assert_result(15, $strong_score['location'], 'city match receives the highest location score');
+assert_result(10, $strong_score['education'], 'exact education value earns education points');
+assert_result(10, $strong_score['lifestyle'], 'matching structured lifestyle earns points');
+
+$partial_score = score_candidate(
+    $calculate_score,
+    make_preferences(array(
+        'min_education' => 'Bachelor',
+        'lifestyle' => 'family oriented',
+        'family_values' => 'close family'
+    )),
+    make_candidate(array(
+        'education' => null,
+        'bio' => 'Family oriented and close family ties'
+    ))
+);
+assert_result(null, $partial_score['education'], 'missing education is unknown');
+assert_result(null, $partial_score['lifestyle'], 'bio presence alone does not earn lifestyle points');
+assert_result(null, $partial_score['family_values'], 'bio presence alone does not earn family-values points');
+assert_result(15.0, $partial_score['coverage'], 'coverage measures evidence against the full scoring scale');
+assert_result(57.5, $partial_score['total'], 'unknown components shrink an otherwise perfect score toward neutral');
+assert_result(
+    true,
+    $strong_score['total'] > $partial_score['total'],
+    'stronger genuine alignment scores above partial alignment'
+);
+
+$education_mismatch = score_candidate(
+    $calculate_score,
+    make_preferences(array(
+        'min_age' => null,
+        'max_age' => null,
+        'min_education' => 'Bachelor'
+    )),
+    make_candidate(array('education' => 'BCA'))
+);
+assert_result(null, $education_mismatch['education'], 'unorderable education values remain unknown');
+assert_result(0.0, $education_mismatch['coverage'], 'unorderable education does not count as comparison evidence');
+assert_result(50.0, $education_mismatch['total'], 'unknown education alone yields neutral score');
+
+$education_match = score_candidate(
+    $calculate_score,
+    make_preferences(array(
+        'min_age' => null,
+        'max_age' => null,
+        'min_education' => ' bachelor '
+    )),
+    make_candidate(array('education' => 'Bachelor'))
+);
+assert_result(10, $education_match['education'], 'education exact match ignores case and surrounding whitespace');
+
+$profession_mismatch = score_candidate(
+    $calculate_score,
+    make_preferences(array(
+        'min_age' => null,
+        'max_age' => null,
+        'preferred_profession' => 'Engineer'
+    )),
+    make_candidate(array('profession' => 'Doctor'))
+);
+assert_result(0, $profession_mismatch['profession'], 'known profession mismatch earns no points');
+assert_result(45.0, $profession_mismatch['total'], 'known profession mismatch is scored as evidence, not unknown');
+
+$bio_only_score = score_candidate(
+    $calculate_score,
+    make_preferences(array(
+        'min_age' => null,
+        'max_age' => null,
+        'lifestyle' => 'vegetarian family values',
+        'family_values' => 'family first',
+        'other_preferences' => 'vegetarian'
+    )),
+    make_candidate(array('bio' => 'Vegetarian and family first'))
+);
+assert_result(50.0, $bio_only_score['total'], 'matching words in bio do not inflate V1 score');
+assert_result(0.0, $bio_only_score['coverage'], 'free-text-only components have no structured scoring coverage');
+
+$preference_values = $model->build_semantic_profile_text(
+    (object) array(
+        'preferred_city' => 'Mumbai',
+        'preferred_religion' => 'Muslim',
+        'min_education' => 'BCA',
+        'preferred_profession' => 'Engineer'
+    ),
+    true
+);
+$candidate_values = $model->build_semantic_profile_text(
+    (object) array(
+        'city' => 'Ahmedabad',
+        'religion' => 'Hindu',
+        'education' => 'Bachelor',
+        'profession' => 'Doctor'
+    )
+);
+$label_only_similarity = $model->calculate_text_similarity(
+    $preference_values,
+    $candidate_values
+);
+assert_result(0, $label_only_similarity['score'], 'different field values receive no label-derived overlap');
+assert_result(
+    array('city', 'religion', 'education', 'profession'),
+    $label_only_similarity['comparable_fields'],
+    'text comparison aligns matching profile fields'
+);
+
+$identical_similarity = $model->calculate_text_similarity(
+    array('profession' => 'Software Engineer'),
+    array('profession' => 'Software Engineer')
+);
+assert_result(100, $identical_similarity['score'], 'identical meaningful field values score 100');
+assert_result(true, $identical_similarity['available'], 'identical meaningful values are available');
+assert_result(
+    true,
+    $identical_similarity['score'] >= 0 && $identical_similarity['score'] <= 100,
+    'maximum similarity respects score bounds'
+);
+
+$different_values_similarity = $model->calculate_text_similarity(
+    array('city' => 'Ahmedabad'),
+    array('city' => 'Chennai')
+);
+assert_result(0, $different_values_similarity['score'], 'different values with the same field key score zero');
+assert_result(true, $different_values_similarity['available'], 'different populated values remain comparable');
+assert_result(
+    true,
+    $different_values_similarity['score'] >= 0 && $different_values_similarity['score'] <= 100,
+    'minimum similarity respects score bounds'
+);
+
+$punctuation_similarity = $model->calculate_text_similarity(
+    $model->build_semantic_profile_text(
+        (object) array('preferred_city' => "  NEW-\tYork  "),
+        true
+    ),
+    $model->build_semantic_profile_text(
+        (object) array('city' => 'new york')
+    )
+);
+assert_result(100, $punctuation_similarity['score'], 'text comparison normalizes case and punctuation');
+assert_result(array('city'), $punctuation_similarity['comparable_fields'], 'only aligned city values are compared');
+
+$unavailable_similarity = $model->calculate_text_similarity(array(), array());
+assert_result(false, $unavailable_similarity['available'], 'empty comparable text is unavailable');
+assert_result(0, $unavailable_similarity['score'], 'empty comparable text has a neutral placeholder score');
+$empty_values_similarity = $model->calculate_text_similarity(
+    array('city' => " \t "),
+    array('city' => 'Ahmedabad')
+);
+assert_result(false, $empty_values_similarity['available'], 'empty values are unavailable');
+
+$missing_field_similarity = $model->calculate_text_similarity(
+    array('city' => 'Ahmedabad', 'religion' => 'Muslim'),
+    array('city' => 'Ahmedabad')
+);
+assert_result(true, $missing_field_similarity['available'], 'a missing field does not invalidate another comparable field');
+assert_result(array('city'), $missing_field_similarity['comparable_fields'], 'missing fields are not included in comparisons');
+
+$unrelated_fields_similarity = $model->calculate_text_similarity(
+    array('bio' => 'family oriented', 'lifestyle' => 'vegetarian'),
+    array('bio' => 'family oriented', 'lifestyle' => 'vegetarian')
+);
+assert_result(false, $unrelated_fields_similarity['available'], 'unrelated/free-text fields are not compared');
+
+$preference_values_with_free_text = $model->build_semantic_profile_text(
+    (object) array(
+        'preferred_city' => 'Ahmedabad',
+        'lifestyle' => 'vegetarian family values',
+        'family_values' => 'close family',
+        'other_preferences' => 'likes travel'
+    ),
+    true
+);
+$candidate_values_with_bio = $model->build_semantic_profile_text(
+    (object) array(
+        'city' => 'Ahmedabad',
+        'bio' => 'vegetarian close family likes travel'
+    )
+);
+assert_result(false, array_key_exists('bio', $preference_values_with_free_text), 'unpaired preference text is excluded');
+assert_result(false, array_key_exists('bio', $candidate_values_with_bio), 'candidate bio is excluded from unrelated-field similarity');
+$bounded_similarity = $model->calculate_text_similarity(
+    $preference_values_with_free_text,
+    $candidate_values_with_bio
+);
+assert_result(100, $bounded_similarity['score'], 'similarity remains bounded at 100');
+assert_result(true, $bounded_similarity['score'] >= 0 && $bounded_similarity['score'] <= 100, 'similarity is always within its 0 to 100 contract');
+
+$blend_model = new FakeAiMatchModel();
+$blend_model->candidates = array(make_api_candidate(3));
+$blend_model->text_similarity = array(
+    'score' => 80,
+    'available' => true,
+    'shared_terms' => array('matching'),
+    'comparable_fields' => array('city')
+);
+$blend_response = run_fake_matching($blend_model);
+assert_result(
+    62,
+    $blend_response['body']['matches'][0]['score'],
+    'available text similarity retains the 80/20 score blend'
+);
+
+$unavailable_blend_model = new FakeAiMatchModel();
+$unavailable_blend_model->candidates = array(make_api_candidate(3));
+$unavailable_blend_response = run_fake_matching($unavailable_blend_model);
+assert_result(
+    56,
+    $unavailable_blend_response['body']['matches'][0]['score'],
+    'unavailable text uses the existing neutral-50 fallback in the 80/20 blend'
+);
+
+$blocked_candidate_model = new FakeAiMatchModel();
+$blocked_candidate_model->candidates = array(
+    make_api_candidate(3),
+    make_api_candidate(5)
+);
+$blocked_candidate_response = run_fake_matching($blocked_candidate_model, array(5));
+assert_result(1, $blocked_candidate_response['body']['matches_generated'], 'blocked members are excluded before AI scoring');
+assert_result(3, $blocked_candidate_response['body']['matches'][0]['user_id'], 'AI returns only the eligible unblocked candidate');
+assert_result(3, $blocked_candidate_model->saved_rows[0]['matched_user_id'], 'blocked candidates are not persisted as matches');
+
+$partial_save_model = new FakeAiMatchModel();
+$partial_save_model->candidates = array(
+    make_api_candidate(5),
+    make_api_candidate(3)
+);
+$partial_save_model->save_outcomes = array(3 => true, 5 => false);
+$partial_save_response = run_fake_matching($partial_save_model);
+assert_result(500, $partial_save_response['status'], 'partial persistence failure returns HTTP 500');
+assert_result(false, $partial_save_response['body']['success'], 'partial persistence failure is not success-shaped');
+assert_result(2, $partial_save_response['body']['matches_generated'], 'generated count includes eligible candidates');
+assert_result(1, $partial_save_response['body']['matches_saved'], 'saved count includes only successful writes');
+assert_result('partial_failure', $partial_save_response['body']['persistence_status'], 'partial failure is identified');
+assert_result('Some matches could not be saved.', $partial_save_response['body']['error'], 'persistence error is safe and useful');
+assert_result(3, $partial_save_response['body']['matches'][0]['user_id'], 'equal scores sort by candidate ID');
+assert_result(true, $partial_save_response['body']['matches'][0]['saved'], 'successful result is marked saved');
+assert_result(false, $partial_save_response['body']['matches'][1]['saved'], 'failed result is explicitly marked unsaved');
+assert_result(42, $partial_save_model->saved_rows[0]['user_id'], 'database write uses the requester ID from session');
+assert_result(3, $partial_save_model->saved_rows[0]['matched_user_id'], 'database write uses the candidate ID');
+assert_result(
+    $partial_save_response['body']['matches'][0]['score'],
+    $partial_save_model->saved_rows[0]['match_score'],
+    'stored score equals the calculated API score'
+);
+foreach (array(
+    'success',
+    'algorithm_version',
+    'user_id',
+    'matches_generated',
+    'matches_saved',
+    'matches'
+) as $contract_field) {
+    assert_result(
+        true,
+        array_key_exists($contract_field, $partial_save_response['body']),
+        'existing API field remains present: ' . $contract_field
+    );
+}
+
+$total_failure_model = new FakeAiMatchModel();
+$total_failure_model->candidates = array(make_api_candidate(3));
+$total_failure_model->save_outcomes = array(3 => false);
+$total_failure_response = run_fake_matching($total_failure_model);
+assert_result(false, $total_failure_response['body']['success'], 'total persistence failure is reported');
+assert_result(0, $total_failure_response['body']['matches_saved'], 'total failure reports zero successful writes');
+assert_result('failed', $total_failure_response['body']['persistence_status'], 'total failure status is explicit');
+assert_result('No matches could be saved.', $total_failure_response['body']['error'], 'total failure message does not expose database details');
+assert_result(false, $total_failure_response['body']['matches'][0]['saved'], 'totally failed result is marked unsaved');
+
+$empty_model = new FakeAiMatchModel();
+$empty_response = run_fake_matching($empty_model);
+assert_result(200, $empty_response['status'], 'empty candidate set returns success');
+assert_result(0, $empty_response['body']['matches_generated'], 'empty candidate set reports zero generated');
+assert_result(0, $empty_response['body']['matches_saved'], 'empty candidate set reports zero saved');
+assert_result('no_matches', $empty_response['body']['persistence_status'], 'empty run is distinguished from a save');
+
+$history_model = new FakeAiMatchModel();
+$history_model->candidates = array(
+    make_api_candidate(3),
+    make_api_candidate(5)
+);
+$first_run = run_fake_matching($history_model);
+$second_run = run_fake_matching($history_model);
+assert_result(2, $first_run['body']['matches_saved'], 'first mocked run saves both results');
+assert_result(2, $second_run['body']['matches_saved'], 'repeated mocked run saves both results');
+assert_result(4, count($history_model->saved_rows), 'repeated runs append history without deleting prior results');
+
+$actual_model = $model_reflection->newInstanceWithoutConstructor();
+$mock_database = new FakeDatabase(false);
+$actual_model->db = $mock_database;
+$save_result = $actual_model->save_match_result(array(
+    'user_id' => 42,
+    'matched_user_id' => 3,
+    'match_score' => 56.0
+));
+assert_result(false, $save_result, 'model reports database insert failure');
+assert_result(true, $mock_database->db_debug, 'database debug setting is restored after failure');
+assert_result(1, $mock_database->insert_calls, 'model attempts exactly one insert');
+
+echo 'PASS: ' . $assertions . ' hard-filter, scoring, text, ranking, and persistence assertions' . PHP_EOL;

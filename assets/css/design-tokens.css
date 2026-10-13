@@ -1,0 +1,35 @@
+@import url("https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap");
+
+:root {
+    --bg: #24030d;
+    --bg-main: var(--bg);
+    --bg-deep: #180209;
+    --bg-card: #310916;
+    --bg-card-soft: #3b0d1c;
+    --panel: var(--bg-card);
+    --panel-raised: var(--bg-card-soft);
+    --panel-highlight: #4b0d1b;
+    --card: var(--bg-card);
+    --card-soft: var(--bg-card-soft);
+    --ink: var(--bg-deep);
+
+    --pink: #ff2f78;
+    --pink-light: #ff5b96;
+    --pink-dark: #d91f61;
+    --hot-pink: var(--pink);
+    --soft-pink: var(--pink-light);
+
+    --cream: #fff0d1;
+    --white: #fff8f4;
+    --warm-white: var(--white);
+    --muted: #c9aeb6;
+    --copy-muted: var(--muted);
+    --muted-dark: #b3949d;
+
+    --border: rgba(255, 125, 169, 0.2);
+    --border-soft: rgba(255, 240, 209, 0.12);
+    --hairline: var(--border);
+
+    --serif: "Poppins", "Segoe UI", Arial, sans-serif;
+    --sans: "Poppins", "Segoe UI", Arial, sans-serif;
+}

@@ -1,0 +1,64 @@
+# INARA feature audit and implementation status
+
+**Snapshot:** 2026-10-09  
+**Stack checked:** CodeIgniter 3, PHP 7.4.33, local MySQL  
+**Scope:** Initial implementation pass; this document is not a claim that the website is complete.
+
+## Existing foundations
+
+The project already contains registration/login and verification-token flows; editable member profiles and photos; partner-preference forms; filtered, paginated discovery; AI Matching V2; interest requests and connections; connection messaging; dashboard profile completion; and interest/message notifications. The AI Matching V2 audit and mocked regression harness are documented separately in `AI_MATCHING_V2_AUDIT.md`.
+
+The local database was inspected read-only. Existing tables include `users`, `profiles`, `partner_preferences`, `profile_photos`, `interests`, `connections`, `messages`, `notifications`, `email_verifications`, `login_attempts`, `ai_match_results`, `ai_profiles`, and `ai_interactions`. No schema changes or data writes were made during this audit.
+
+## Current implementation pass
+
+- Enabled CodeIgniter CSRF protection with no excluded routes. Manual POST forms now include the configured token; CodeIgniter form-helper forms continue to generate it.
+- Set session cookies HttpOnly, made Secure conditional on an HTTPS request, and configured old session data to be destroyed on regeneration.
+- Regenerate and destroy the prior session identifier after login and after a successful password change.
+- Logout now requires POST; navigation logout controls submit a CSRF-protected form.
+- Added an authenticated password-change route. It verifies the current password, validates the replacement against the existing minimum password policy, hashes it with `PASSWORD_DEFAULT`, handles database errors without public SQL output, and regenerates the session after a successful write.
+- Removed fabricated profile cards, match scores, member totals, and sidebar interaction counts from the landing and generic portal surfaces. Sections without real data integration now say so instead of showing sample members or activity.
+- Repaired the landing-page hero on tablet/mobile widths: the intent bar now sits below the private discovery card instead of covering it.
+- Restored the homepage hero portraits using the existing local `maya.png` and `dev.png` assets, labeled them as illustrative previews, and reflowed the hero at tablet/mobile widths so content does not overlap or clip.
+- Wired profile views, shortlist/remove, and block/unblock to the existing `ai_interactions` table without schema changes. These are append-only events; metadata records the latest saved/removed or blocked/unblocked state.
+- Blocked pairs are omitted from discovery, dashboard recommendations, and AI candidate generation; they cannot open profiles, send/accept interests, or access conversations. The blocked list provides an unblock action. Older block events without state metadata are treated as active blocks. AI scoring and response shape are unchanged.
+- No database schema or existing member records were changed.
+
+## Remaining work by module
+
+| Module | Current status and known gaps |
+|---|---|
+| Authentication | Registration/login/logout and email verification tokens exist. Password change was added in this pass. Verification email delivery is not configured; password reset, mobile verification, account deactivation/deletion, and cross-session revocation are not implemented. |
+| Profiles/photos | Profile editing, completion fields, photo upload, primary-photo selection, and user-owned photo deletion exist. Photo moderation/verification does not have a complete admin workflow; privacy-based field/photo visibility is not enforced. |
+| Preferences | The main Preferences controller supports age, height, income, location, religion, community, education, occupation, marital status, and lifestyle filters. A second Partner Preferences surface also remains; its behavior should be consolidated after compatibility review. |
+| Search/discovery | Existing search filters and pagination use real active profiles. Keyword search, Matrimonial ID search, saved searches, and saved-search management are not implemented. |
+| AI Matching | V2 filters, scoring corrections, lexical comparison, ranking, and persistence are in place with a 100-assertion mocked harness. Authenticated end-to-end matching and real match-result writes were not rerun in this pass. The existing generation endpoint persists results on GET; changing its method may affect the current API, so it remains a security follow-up requiring an explicit compatibility decision. |
+| Match discovery | Real-profile discovery exists. Separate premium, nearby, and Match-of-the-Day eligibility/ranking are not implemented. |
+| Interests | Send/respond/cancel, duplicate-pair protection, and connection creation are present. Full browser/database regression coverage remains outstanding. |
+| Profile interactions | Profile-view history, shortlist/remove, block/unblock, and block enforcement in discovery/interests/messaging are now wired to `ai_interactions`. Photo requests and concurrency-focused database integration coverage remain unimplemented. The event table has no unique pair constraint; interaction state is derived from the most recent event ID for each direction. |
+| Messaging | Authorized connection conversations, sending, and read status are present. Inbox/sent/drafts/trash folders, replies as a separate flow, and authorized deletion are not implemented. |
+| Privacy/settings | Password update exists. Configurable contact/photo visibility, deactivation, and account deletion are not implemented. |
+| Verification/moderation | Email token verification exists without configured delivery. Admin review, profile verification, reporting, and abuse-moderation workflows are not implemented. |
+| Dashboard/notifications | Profile completion, recommended profiles, and interest/message notification counts exist. Full activity statistics and database notifications for verification/account events are missing. |
+| Membership/payments | No membership/payment schema or payment-provider integration was found. Premium access and real payment history must not be simulated. |
+| Admin | No admin roles or role-protected admin controller/schema were found. Administrative access must not be inferred from account IDs or fabricated. |
+| Testing | Existing tests are isolated PHP mocks. Authenticated browser workflows, upload/storage behavior, concurrent writes, and full database integration still require focused tests. |
+
+## Verification for this pass
+
+- PHP 7.4.33 syntax checks passed for all changed PHP files.
+- `tests/auth_password_test.php` passed 9 mocked password-change assertions.
+- `tests/ai_hard_filters_test.php` passed 103 mocked matching assertions, including blocked-candidate exclusion.
+- Local HTTP checks confirmed the login page emits a CSRF field and an HttpOnly session cookie, tokenless POST is rejected with HTTP 403, and GET logout is rejected with HTTP 405.
+- The homepage loaded in the local browser and no longer displayed the removed sample member names or invented match percentages.
+- Tablet (706px) and mobile (390px) browser geometry checks confirmed the intent bar starts after the profile card, ends before the search panel, and stays within the viewport.
+- Homepage browser checks at 1440px, 1200px, 1024px, 790px, and 390px confirmed both portraits load, no horizontal overflow occurs, and the hero content/artwork or stacked sections remain separated.
+- Local HTTP checks returned 200 (`image/png`) for both hero portraits.
+- `tests/profile_interaction_model_test.php` passed 6 mocked state assertions; the password and AI-matching harnesses passed 9 and 103 assertions respectively.
+- A read-only prepared query against the actual local `ai_interactions` schema succeeded. No interaction records were inserted or altered; authenticated save/block, interest, and messaging flows still need a real signed-in browser/database test.
+- The authenticated password-change page loaded locally and emitted a 32-character CSRF token. No password was submitted and no user account was modified during browser checks.
+- Database inspection was read-only. No automated test claimed a real password update, real message/interest write, or authenticated AI match run.
+
+## Deployment note
+
+The local project is served over HTTP, so the Secure session-cookie flag remains false for local requests and becomes true when PHP sees HTTPS. Production must use HTTPS end-to-end; deployments that terminate TLS at a reverse proxy should configure the Secure flag appropriately in the trusted deployment environment.
